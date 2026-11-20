@@ -381,6 +381,7 @@
           <li>役満：国士無双・四暗刻・大三元・字一色・緑一色・清老頭・九蓮宝燈・小四喜・大四喜・四槓子（重なればダブル役満）。</li>
           <li>ダブル役満：国士無双十三面待ち・四暗刻単騎・純正九蓮宝燈・大四喜。</li>
           <li>流し満貫：流局時に、捨て牌がすべて1・9・字牌で1枚も鳴かれていなければ、満貫のツモと同じ受け渡しになります（その場合、テンパイ料はありません）。</li>
+          <li>フリテンあり：自分の捨て牌に和了牌が含まれている間はロンできません。また、ロンできる牌を見逃すとフリテンになります（リーチしていない場合は自分の次のツモまで、リーチ後はその局が終わるまで続きます）。ツモ和了はフリテンでもできます。</li>
           <li>ダブルロンあり：放銃者は両方の和了者に支払い、供託のリーチ棒は放銃者に近い順の和了者が受け取ります。三家和了（3人同時ロン）は流局です。</li>
           <li>四風連打：鳴きが入っていない状態で、4人全員が最初の捨て牌で同じ風牌（東・南・西・北のいずれか）を切ると流局です。点数の受け渡しはなく、リーチ棒は供託のまま次局へ持ち越し、親は連荘します。</li>
           <li>流局時はテンパイ料（合計3000点）の受け渡しあり。親がテンパイなら連荘します。</li>
@@ -1106,7 +1107,8 @@ const G = {
 };
 function newPlayer(seat){
   return { seat:seat, name: seat===0 ? "あなた" : CPU_NAMES[seat-1], hand:[], melds:[], discards:[],
-           score:25000, riichi:false, riichiTurn:false, riichiMarkerPending:false, ippatsu:false, isDealer:false,
+           score:25000, riichi:false, riichiMarkerPending:false, ippatsu:false, isDealer:false,
+           tempFuriten:false, riichiFuriten:false,
            doubleRiichi:false, hasDiscarded:false, discardCalled:false };
 }
 /* 自分以外が鳴いたとき、鳴いた人の捨て牌の上あたりに表示するバナー（表示は1秒） */
@@ -1168,6 +1170,31 @@ function ctxFor(p, extra){
    入ると消える。鳴いた本人がリーチ中の暗槓・加槓をする場合は本人の一発は消えない */
 function clearIppatsuOnCall(callerSeat){
   for(const q of G.players){ if(q.seat !== callerSeat) q.ippatsu = false; }
+}
+/* フリテン判定：自分の捨て牌に和了牌が含まれる「捨て牌フリテン」に加え、
+   ロンを見逃した「見逃しフリテン」も対象にする。
+   - tempFuriten：リーチしていないときに見逃したもので、自分の次のツモで解ける
+   - riichiFuriten：リーチ後に見逃したもので、その局が終わるまで解けない */
+function isFuriten(p){
+  if(p.riichiFuriten || p.tempFuriten) return true;
+  const base = countsOf(p.hand.concat(allMeldTiles(p)));
+  for(const d of p.discards){
+    const cc = base.slice(); cc[d.t]++;
+    if(shantenOf(cc)===-1) return true;
+  }
+  return false;
+}
+/* ロンを見逃したときに呼ぶ：リーチ中なら局終了まで、そうでなければ次のツモまでフリテンにする。
+   見逃したら一発も消える */
+function markMissedRon(p){
+  if(p.riichi) p.riichiFuriten = true;
+  else p.tempFuriten = true;
+  p.ippatsu = false;
+}
+/* 自分がツモったときに呼ぶ：同巡フリテン（tempFuriten）はツモで解ける。
+   リーチ後の見逃しフリテン（riichiFuriten）は解けない */
+function clearTempFuritenOnDraw(p){
+  p.tempFuriten = false;
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 function log(msg){
@@ -1244,7 +1271,8 @@ function startRound(){
   G.wall = buildWall();
   G.wallIdx = 0; G.deadIdx = G.wall.length - 14;
   for(const p of G.players){
-    p.hand = []; p.melds = []; p.discards = []; p.riichi = false; p.riichiTurn = false; p.riichiMarkerPending = false; p.ippatsu = false;
+    p.hand = []; p.melds = []; p.discards = []; p.riichi = false; p.riichiMarkerPending = false; p.ippatsu = false;
+    p.tempFuriten = false; p.riichiFuriten = false;
     p.doubleRiichi = false; p.hasDiscarded = false; p.discardCalled = false;
     p.isDealer = (p.seat === G.dealer);
   }
@@ -1274,6 +1302,8 @@ async function runTurn(token){
   if(drawableLeft() <= 0){ onRyuukyoku(token); return; }
   const tile = G.wall[G.wallIdx++];
   p.hand.push(tile);
+  /* 自分のツモで同巡（見逃し）フリテンは解ける。リーチ後の見逃しは解けない */
+  clearTempFuritenOnDraw(p);
   G.drawnTile = tile;
   mjaiPush({ type:"tsumo", actor:p.seat, pai: p.seat===0 ? mjaiTile(tile) : "?" });
   /* 最後のツモ牌なら海底摸月の対象になる */
@@ -1411,12 +1441,12 @@ function doDiscard(token, p, tile, declareRiichi){
   mjaiPush({ type:"dahai", actor:p.seat, pai:mjaiTile(tile), tsumogiri:mjaiTsumogiri });
   if(declareRiichi) mjaiPush({ type:"reach_accepted", actor:p.seat });
   if(declareRiichi && !p.riichi){
-    p.riichi = true; p.riichiTurn = true; p.ippatsu = true;
+    p.riichi = true; p.ippatsu = true;
     /* ダブルリーチ：自分の最初の捨て牌で、鳴きが一切入っていない場合 */
     p.doubleRiichi = isFirstDiscard && !G.anyCall;
     p.score -= 1000; G.pot += 1;
     log("<b>"+p.name+"</b> リーチ！");
-  } else if(p.riichiTurn){ p.riichiTurn = false; }
+  }
   /* リーチ後にツモって上がらずに切ったら、その時点で一発は消える
      （宣言牌を切った直後のこの呼び出しでは declareRiichi のため消えない） */
   if(p.riichi && !declareRiichi) p.ippatsu = false;
@@ -1446,17 +1476,8 @@ async function handleCalls(token, discarderSeat, tile){
     const ronCandidates = [];
     for(const seat of order){
       const p = G.players[seat];
-      // furiten: if any of own discards is a winning tile
-      let isFuriten = false;
-      {
-        const base = countsOf(p.hand.concat(allMeldTiles(p)));
-        for(const d of p.discards){
-          const cc = base.slice(); cc[d.t]++;
-          if(shantenOf(cc)===-1){ isFuriten = true; break; }
-        }
-        if(p.riichiTurn) isFuriten = false;
-      }
-      if(isFuriten) continue;
+      // フリテン（捨て牌フリテン＋見逃しフリテン）の間はロンできない
+      if(isFuriten(p)) continue;
       let res = null;
       try { res = hasYakuWin(p, tile, false, ctxFor(p, { houtei: drawableLeft()<=0 })); } catch(e) { res = null; }
       if(!res) continue;
@@ -1471,7 +1492,7 @@ async function handleCalls(token, discarderSeat, tile){
         const ans = await askHumanCall([{label:"ロン", action:"ロン", tiles:[tile.t], called:tile.t, cls:"primary tile-btn", val:"ron"}, {label:"見逃す", cls:"pass-btn", val:"pass"}], G.players[discarderSeat].name+" の捨て牌でロンできます");
         if(token !== G.roundToken) return;
         if(ans==="ron") humanWantsRon = true;
-        else { G.players[0].tempFuriten = true; G.players[0].ippatsu = false; /* ロンを見逃したら一発は消える */ }
+        else { markMissedRon(G.players[0]); /* ロンを見逃したら見逃しフリテン（リーチ中は局終了まで） */ }
       }
       const ronWinners = [];
       for(const cand of ronCandidates){
@@ -1652,16 +1673,8 @@ async function checkChankan(token, kanPlayer, tileType){
   const candidates = [];
   for(const seat of order){
     const q = G.players[seat];
-    let isFuriten = false;
-    {
-      const base = countsOf(q.hand.concat(allMeldTiles(q)));
-      for(const d of q.discards){
-        const cc = base.slice(); cc[d.t]++;
-        if(shantenOf(cc)===-1){ isFuriten = true; break; }
-      }
-      if(q.riichiTurn) isFuriten = false;
-    }
-    if(isFuriten) continue;
+    // フリテン（捨て牌フリテン＋見逃しフリテン）の間は槍槓ロンもできない
+    if(isFuriten(q)) continue;
     let res = null;
     try { res = hasYakuWin(q, tileObj, false, ctxFor(q, { chankan:true })); } catch(e) { res = null; }
     if(res) candidates.push({ seat:seat, player:q, res:res });
@@ -1675,7 +1688,7 @@ async function checkChankan(token, kanPlayer, tileType){
     const ans = await askHumanCall([{label:"ロン", action:"ロン", tiles:[tileType], called:tileType, cls:"primary tile-btn", val:"ron"}, {label:"見逃す", cls:"pass-btn", val:"pass"}], kanPlayer.name+" の加槓でロンできます（槍槓）");
     if(token !== G.roundToken) return true; /* 局が切り替わっていたらカンは進めない */
     if(ans==="ron") humanWantsRon = true;
-    else { G.players[0].tempFuriten = true; G.players[0].ippatsu = false; }
+    else { markMissedRon(G.players[0]); }
   }
   const winners = candidates.filter(c=> c.seat!==0 || humanWantsRon);
   if(!winners.length) return false;
@@ -1728,6 +1741,8 @@ async function kanDraw(token, p){
   if(G.deadIdx <= G.wallIdx){ onRyuukyoku(token); return; }
   const tile = G.wall[G.deadIdx++];
   p.hand.push(tile);
+  /* 嶺上ツモもツモなので、同巡（見逃し）フリテンは解ける */
+  clearTempFuritenOnDraw(p);
   G.drawnTile = tile;
   mjaiPush({ type:"tsumo", actor:p.seat, pai: p.seat===0 ? mjaiTile(tile) : "?" });
   /* 嶺上牌でのツモは嶺上開花。山が尽きていれば海底摸月も重なる */

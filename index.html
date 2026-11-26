@@ -387,7 +387,7 @@
           <li>流局時はテンパイ料（合計3000点）の受け渡しあり。親がテンパイなら連荘します。</li>
           <li>本場：流局のたびに1本場ずつ積みます（親の和了による連荘でも1本場積みます）。次の和了時に1本場につき300点が加算されます（ロンは放銃者が300点×本場数、ツモは各家が100点×本場数ずつ追加で支払います）。流し満貫にもその時点の本場分がツモと同様に加算されます。三家和了・四風連打の流局でも本場は積みます。親以外の和了で本場は0に戻ります。</li>
           <li>誰かの持ち点がマイナスになったら、その時点で終局します。</li>
-          <li>CPUの打牌は期待値計算で選びます：受け入れ枚数と残り巡目から和了確率を見積もり、見込み打点（役・ドラ・リーチ期待）を掛け、相手のリーチに対する放銃の期待損失を差し引いて一番得な牌を切ります。鳴きとダマテンの判断にも同じ打点の見積もりを使います。</li>
+          <li>CPUの打牌は、まずシャンテン数が最小になる切り方に絞ってから、その中で期待値（受け入れ枚数と残り巡目から見積もる和了確率×見込み打点−相手のリーチに対する放銃の期待損失）が一番高い牌を切ります。テンパイや満貫級の好形は相手リーチにも押し気味に打ちます。鳴きはシャンテンが下がって役の道が残る場合にし、見込み打点が低い手では見送ります。待ちが悪くなる暗槓はしません。</li>
         </ul>
         <div class="modal-actions"><button class="btn primary" id="btn-rules-close" type="button">閉じる</button></div>
       </div>
@@ -2053,16 +2053,31 @@ function cpuChooseDiscard(p){
     const pWin = winProbEstimate(uke.shanten, uke.tiles, unknown, selfDraws, totalDrawsLeft);
     const danger = threats.length ? tileDanger(tile.t, threats, baseSeen, countsOf(p.hand)) : 0;
     /* 危険度100の無筋中張牌で放銃率およそ15%と置く */
-    const dealLoss = threats.length ? (danger/100) * 0.15 * maxThreatScore : 0;
+    let dealLoss = threats.length ? (danger/100) * 0.15 * maxThreatScore : 0;
+    /* 押し引き：テンパイ、または満貫級の見込みがある好形1シャンテンは押しに寄せ、
+       放銃損失を割り引く。さらに損失自体に上限を付け、相手リーチ時に
+       安全牌で手を壊す（シャンテンが後退する）選択が勝たないようにする */
+    const pushing = uke.shanten===0 || (uke.shanten===1 && uke.tiles>=6 && est.score>=7700);
+    if(pushing) dealLoss *= 0.45;
+    const lossCap = pushing ? 1100 : 800;
+    if(dealLoss > lossCap) dealLoss = lossCap;
     const ev = pWin * est.score - dealLoss;
     /* 期待値を主軸に、同程度なら受け入れの広さ・形・手役の含みで選ぶ */
     let score = ev*10 + uke.tiles*14 + uke.kinds*40 + shapeBonus(counts)*0.6 + valueBonus(p, total)*0.15;
     if(obj.red) score -= 650;                       /* keep aka-dora */
-    cands.push({ obj:obj, type:tile.t, shanten:uke.shanten, ukeTiles:uke.tiles, score:score, danger:danger, ev:ev });
+    cands.push({ obj:obj, type:tile.t, shanten:uke.shanten, ukeTiles:uke.tiles, score:score, danger:danger, ev:ev, estScore:est.score });
   }
   if(!cands.length) return p.hand[p.hand.length-1];
-  cands.sort((a,b)=> b.score - a.score);
-  return cands[0].obj;
+  /* 辞書式に選ぶ：まず最小シャンテンの候補だけに絞り、その中だけで期待値・受け入れを比べる。
+     シャンテンを犠牲にするのは、1シャンテン後退しても見込み打点が満貫級に跳ね上がり、
+     最小シャンテン側の最善より大きく上回る場合（混一色狙いなど）だけに限る */
+  const minShanten = Math.min.apply(null, cands.map(c=>c.shanten));
+  let pool = cands.filter(c=>c.shanten===minShanten);
+  const poolBestEst = Math.max.apply(null, pool.map(c=>c.estScore));
+  const jumpers = cands.filter(c=> c.shanten===minShanten+1 && c.estScore>=7700 && c.estScore>=poolBestEst+3000);
+  if(jumpers.length) pool = pool.concat(jumpers);
+  pool.sort((a,b)=> b.score - a.score);
+  return pool[0].obj;
 }
 /* riichi decision for the discard cpuChooseDiscard picked, based on expected value:
    compare the damaten hand's estimated score against the riichi gain.
@@ -2245,8 +2260,8 @@ function chiConfirmsSanshoku(afterDiscardCounts, melds, chiSeqStart){
   return true;
 }
 /* 見込み打点ゲート：potential = 役の見込み翻数 + ドラ（赤含む）。
-   テンパイになる鳴きは速度を優先して通す。1シャンテンでは2翻以上の見込み、
-   2シャンテンでは3翻以上、それより遠い手は役満級の寄り（5翻相当）がないと通さない。
+   テンパイになる鳴きは速度を優先して通す。1シャンテンでは1翻以上の見込み、
+   2シャンテンでは2翻以上、それより遠い手は役満級の寄り（5翻相当）がないと通さない。
    ドラが多いほど potential が上がって鳴きやすくなる。すでに副露している手は敷居を1下げる */
 function cpuCallValueOk(p, handCountsAfterCall, meldsAfter, afterShanten, totalTileObjs){
   if(afterShanten<=0) return true;
@@ -2264,8 +2279,8 @@ function cpuCallValueOk(p, handCountsAfterCall, meldsAfter, afterShanten, totalT
   /* (3) 推定打点が高い手（満貫級）は、期待値が高いので鳴きの敷居を1下げる */
   const est = estimateHandValue(p, handCountsAfterCall, meldsAfter, totalTileObjs || null, false);
   const richHand = est.score >= 7700 ? 1 : 0;
-  if(afterShanten===1) return potential + openBonus + richHand >= 2;
-  if(afterShanten===2) return potential + openBonus + richHand >= 3;
+  if(afterShanten===1) return potential + openBonus + richHand >= 1;
+  if(afterShanten===2) return potential + openBonus + richHand >= 2;
   return potential + openBonus + richHand >= 5;
 }
 function cpuWantsPon(p, tile){
@@ -2280,7 +2295,10 @@ function cpuWantsPon(p, tile){
   const seatWind = 27 + ((p.seat - G.dealer + 4) % 4);
   const isYakuhai = tile.t>=31 || tile.t===seatWind || tile.t===27;
   if(isYakuhai && after===cur && cur<=2) want = true;
-  if(after===cur && cur<=1 && isSimple(tile.t)){
+  /* ドラの対子も打点の芯になるので、シャンテンが下がらなくても早めに鳴く */
+  const doraTypes = G.doraIndicators.map(nextDora);
+  if(after===cur && cur<=2 && doraTypes.includes(tile.t)) want = true;
+  if(after===cur && cur<=2 && isSimple(tile.t)){
     const total = countsOf(p.hand.concat(allMeldTiles(p)));
     let simples = 0, tot = 0;
     for(let t=0;t<34;t++){ tot += total[t]; if(isSimple(t)) simples += total[t]; }
@@ -2319,12 +2337,13 @@ function cpuChiChoice(p, tile, options){
     const chiMelds = p.melds.concat([{ kind:"chi", tiles:[{t:o[0]}, {t:o[1]}, tile] }]);
     /* never open the hand into yakunashi: some yaku must remain reachable */
     if(!openHandHasYakuPath(p, c2, chiMelds)) continue;
-    /* (2) チーは厳しく制限：テンパイになるか、タンヤオ／三色同順が確定する場合だけ */
+    /* チーは、シャンテンが下がって役の道が残るなら許可する（役の道は上の
+       openHandHasYakuPath で確認済みで、役なしになるチーはしない）。
+       シャンテンが下がらないチーは、タンヤオ／三色同順が確定する場合だけ */
     const chiSeqStart = Math.min(o[0], o[1], tile.t);
-    const isTenpai = optShanten===0;
     const tanyaoOk = optAfterDiscard && chiConfirmsTanyao(optAfterDiscard, chiMelds);
     const sanshokuOk = optAfterDiscard && chiConfirmsSanshoku(optAfterDiscard, chiMelds, chiSeqStart);
-    if(!isTenpai && !tanyaoOk && !sanshokuOk) continue;
+    if(optShanten===cur && !tanyaoOk && !sanshokuOk) continue;
     /* (3) 安い手は鳴かない：見込み打点が低ければ見送る（テンパイチーは cpuCallValueOk 側で通る） */
     if(!cpuCallValueOk(p, c2, chiMelds, optShanten, totalObjs)) continue;
     const key = [-optShanten, optUke];
@@ -2354,8 +2373,25 @@ function cpuWantsKan(p, tile){
 function cpuKanChoice(p){
   if(p.riichi) return null; /* don't risk changing a riichi wait */
   const counts = countsOf(p.hand);
+  const seen = seenCounts();
+  /* カン前の最善：1枚切った後のシャンテンと受け入れ（テンパイなら待ち）枚数 */
+  let curBest = null;
   for(let t=0;t<34;t++){
-    if(counts[t]===4) return { type:"ankan", t:t };
+    if(counts[t]===0) continue;
+    counts[t]--;
+    const u = ukeInfo(counts, p.melds.length, seen);
+    if(!curBest || u.shanten < curBest.shanten || (u.shanten===curBest.shanten && u.tiles > curBest.tiles)) curBest = u;
+    counts[t]++;
+  }
+  for(let t=0;t<34;t++){
+    if(counts[t]!==4) continue;
+    /* カン後の手（10枚＋カン1副露＝切った後の13枚相当）と比べる */
+    const c2 = counts.slice(); c2[t] -= 4;
+    const after = ukeInfo(c2, p.melds.length+1, seen);
+    /* シャンテンが悪化する暗槓はしない。テンパイ時は待ちが減る暗槓もしない */
+    if(curBest && after.shanten > curBest.shanten) continue;
+    if(curBest && curBest.shanten===0 && after.tiles < curBest.tiles) continue;
+    return { type:"ankan", t:t };
   }
   for(const m of p.melds){
     if(m.kind==="pon" && p.hand.some(x=>x.t===m.tiles[0].t)) return { type:"kakan", t:m.tiles[0].t };
